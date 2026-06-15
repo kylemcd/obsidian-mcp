@@ -220,6 +220,79 @@ describe("Cloudflare Access OAuth compatibility", () => {
   });
 });
 
+describe("Security hardening", () => {
+  it("rate limits clients past the configured per-minute budget", async () => {
+    const { server: limitedServer, baseUrl: limitedBase } = await startServer({
+      RATE_LIMIT_PER_MINUTE: "2"
+    });
+
+    try {
+      const statuses: number[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        const response = await fetch(`${limitedBase}/mcp`, {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: i, method: "tools/list", params: {} })
+        });
+        await response.text();
+        statuses.push(response.status);
+      }
+
+      expect(statuses[0]).not.toBe(429);
+      expect(statuses[2]).toBe(429);
+    } finally {
+      await closeServer(limitedServer);
+    }
+  });
+
+  it("rejects requests with a Host outside the allow-list when configured", async () => {
+    const { server: guardedServer, baseUrl: guardedBase } = await startServer({
+      ALLOWED_HOSTS: "obsidian.example.com"
+    });
+
+    try {
+      const response = await fetch(`${guardedBase}/mcp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          host: "evil.example.com"
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })
+      });
+
+      expect(response.status).toBe(403);
+    } finally {
+      await closeServer(guardedServer);
+    }
+  });
+});
+
+async function startServer(overrides: Record<string, string>) {
+  const config = loadConfig({
+    HOST: "127.0.0.1",
+    PORT: "8787",
+    VAULT_PATH: tempDir,
+    VAULT_NAME: "TestVault",
+    CF_ACCESS_REQUIRED: "false",
+    ...overrides
+  });
+  const { app } = createApp(config);
+  const startedServer = createServer(app);
+  await new Promise<void>((resolve) => startedServer.listen(0, "127.0.0.1", resolve));
+  const address = startedServer.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected TCP server address");
+  }
+  return { server: startedServer, baseUrl: `http://127.0.0.1:${address.port}` };
+}
+
+async function closeServer(target: Server) {
+  await new Promise<void>((resolve, reject) => {
+    target.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
 async function initialize() {
   await initializeMcp();
 }

@@ -44,6 +44,35 @@ describe("Vault", () => {
     expect(() => vault.resolveNotePath("/etc/passwd")).toThrow(VaultPathError);
   });
 
+  it("refuses to read through a symlink that escapes the vault", async () => {
+    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), "obsidian-mcp-outside-"));
+    const secretPath = path.join(outsideDir, "secret.md");
+    await fs.writeFile(secretPath, "# Secret\n\ntop secret\n", "utf8");
+    try {
+      await fs.symlink(secretPath, path.join(tempDir, "leak.md"));
+    } catch {
+      // Filesystems without symlink support (e.g. some CI) can't exercise this case.
+      await fs.rm(outsideDir, { recursive: true, force: true });
+      return;
+    }
+
+    await expect(vault.readNote("leak.md")).rejects.toThrow(VaultPathError);
+    await fs.rm(outsideDir, { recursive: true, force: true });
+  });
+
+  it("refuses to write through a symlinked directory that escapes the vault", async () => {
+    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), "obsidian-mcp-outside-"));
+    try {
+      await fs.symlink(outsideDir, path.join(tempDir, "linked"), "dir");
+    } catch {
+      await fs.rm(outsideDir, { recursive: true, force: true });
+      return;
+    }
+
+    await expect(vault.writeNote({ path: "linked/pwned.md", content: "nope" })).rejects.toThrow(VaultPathError);
+    await fs.rm(outsideDir, { recursive: true, force: true });
+  });
+
   it("searches notes with snippets", async () => {
     const matches = await vault.searchNotes({ query: "oauth" });
 

@@ -48,17 +48,41 @@ export class Vault {
   resolveNotePath(input: string): string {
     const relative = normalizeNotePath(input);
     const absolute = path.resolve(this.root, ...relative.split("/"));
-    const rootWithSeparator = this.root.endsWith(path.sep) ? this.root : `${this.root}${path.sep}`;
 
-    if (absolute !== this.root && !absolute.startsWith(rootWithSeparator)) {
-      throw new VaultPathError("Note path escapes the vault root");
-    }
+    assertWithinRoot(this.root, absolute);
 
     return absolute;
   }
 
+  /**
+   * Resolve symlinks on the deepest existing ancestor of `absolute` and re-check
+   * containment. The string-based check in {@link resolveNotePath} cannot see through
+   * symlinks, so a link inside the vault that points elsewhere would otherwise let
+   * reads/writes escape the vault root. Returns the fully resolved real path.
+   */
+  private async assertRealPathWithinRoot(absolute: string): Promise<string> {
+    const realRoot = await fs.realpath(this.root);
+    let existing = absolute;
+
+    for (;;) {
+      try {
+        const realExisting = await fs.realpath(existing);
+        const suffix = path.relative(existing, absolute);
+        const resolved = suffix ? path.resolve(realExisting, suffix) : realExisting;
+        assertWithinRoot(realRoot, resolved);
+        return resolved;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const parent = path.dirname(existing);
+        if (parent === existing) throw error; // reached the filesystem root
+        existing = parent;
+      }
+    }
+  }
+
   async listNotes(options: { folder?: string; limit?: number } = {}): Promise<NoteSummary[]> {
     const start = options.folder ? this.resolveFolderPath(options.folder) : this.root;
+    if (options.folder) await this.assertRealPathWithinRoot(start);
     const limit = clampLimit(options.limit, 200);
     const notes: NoteSummary[] = [];
 
@@ -72,6 +96,7 @@ export class Vault {
 
   async readNote(notePath: string): Promise<Note> {
     const absolute = this.resolveNotePath(notePath);
+    await this.assertRealPathWithinRoot(absolute);
     const [content, stat] = await Promise.all([fs.readFile(absolute, "utf8"), fs.stat(absolute)]);
 
     return {
@@ -88,6 +113,7 @@ export class Vault {
     if (!query) throw new Error("query is required");
 
     const start = options.folder ? this.resolveFolderPath(options.folder) : this.root;
+    if (options.folder) await this.assertRealPathWithinRoot(start);
     const needle = query.toLowerCase();
     const limit = clampLimit(options.limit, 25);
     const matches: SearchMatch[] = [];
@@ -111,6 +137,7 @@ export class Vault {
 
   async writeNote(options: { path: string; content: string; overwrite?: boolean }): Promise<NoteSummary> {
     const absolute = this.resolveNotePath(options.path);
+    await this.assertRealPathWithinRoot(absolute);
 
     if (!options.overwrite) {
       try {
@@ -128,6 +155,7 @@ export class Vault {
 
   async appendNote(options: { path: string; content: string; create?: boolean }): Promise<NoteSummary> {
     const absolute = this.resolveNotePath(options.path);
+    await this.assertRealPathWithinRoot(absolute);
     await fs.mkdir(path.dirname(absolute), { recursive: true });
 
     try {
@@ -145,11 +173,8 @@ export class Vault {
   private resolveFolderPath(input: string): string {
     const normalized = normalizeVaultRelativePath(input);
     const absolute = path.resolve(this.root, ...normalized.split("/"));
-    const rootWithSeparator = this.root.endsWith(path.sep) ? this.root : `${this.root}${path.sep}`;
 
-    if (absolute !== this.root && !absolute.startsWith(rootWithSeparator)) {
-      throw new VaultPathError("Folder path escapes the vault root");
-    }
+    assertWithinRoot(this.root, absolute, "Folder path escapes the vault root");
 
     return absolute;
   }
@@ -170,6 +195,13 @@ export class Vault {
       size: stat.size,
       modifiedAt: stat.mtime.toISOString()
     };
+  }
+}
+
+function assertWithinRoot(root: string, candidate: string, message = "Note path escapes the vault root"): void {
+  const rootWithSeparator = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  if (candidate !== root && !candidate.startsWith(rootWithSeparator)) {
+    throw new VaultPathError(message);
   }
 }
 

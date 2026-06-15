@@ -1,4 +1,4 @@
-import express, { type Express, type Request, type Response } from "express";
+import express, { type Express, type Request, type RequestHandler, type Response } from "express";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -34,6 +34,15 @@ export function createApp(config: AppConfig): AppHandle {
   const sseSessions = new Map<string, SseSession>();
   const accessGuard = cloudflareAccessMiddleware(config.cloudflareAccess);
   const browserOriginGuard = originGuard(config.allowedOrigins);
+  const rateLimiter = rateLimitGuard(config.rateLimitPerMinute);
+
+  if (config.cloudflareAccess.required && config.cloudflareAccess.allowedEmails.size === 0) {
+    console.warn(
+      "cloudflare_access_no_email_allowlist",
+      "CF_ACCESS_ALLOWED_EMAILS is empty: every identity your Cloudflare Access policy admits can use this vault. " +
+        "Set CF_ACCESS_ALLOWED_EMAILS to restrict access to specific users."
+    );
+  }
 
   app.disable("x-powered-by");
   installRequestDiagnostics(app, config);
@@ -66,27 +75,76 @@ export function createApp(config: AppConfig): AppHandle {
     res.status(204).end();
   });
 
-  app.post(config.mcpPath, browserOriginGuard, accessGuard, async (req, res) => {
+  app.post(config.mcpPath, rateLimiter, browserOriginGuard, accessGuard, async (req, res) => {
     await handleMcpPost(config, req, res);
   });
 
-  app.get(config.mcpPath, browserOriginGuard, accessGuard, async (req, res) => {
+  app.get(config.mcpPath, rateLimiter, browserOriginGuard, accessGuard, async (req, res) => {
     await handleMcpSessionRequest(sessions, req, res);
   });
 
-  app.delete(config.mcpPath, browserOriginGuard, accessGuard, async (req, res) => {
+  app.delete(config.mcpPath, rateLimiter, browserOriginGuard, accessGuard, async (req, res) => {
     await handleMcpSessionRequest(sessions, req, res);
   });
 
-  app.get(ssePath, browserOriginGuard, accessGuard, async (req, res) => {
+  app.get(ssePath, rateLimiter, browserOriginGuard, accessGuard, async (req, res) => {
     await handleSseConnect(config, sseSessions, req, res);
   });
 
-  app.post(sseMessagesPath, browserOriginGuard, accessGuard, async (req, res) => {
+  app.post(sseMessagesPath, rateLimiter, browserOriginGuard, accessGuard, async (req, res) => {
     await handleSseMessage(sseSessions, req, res);
   });
 
   return { app, sessions, sseSessions };
+}
+
+/**
+ * Fixed-window, in-memory per-client rate limiter. Keyed by Cloudflare's
+ * `cf-connecting-ip` when present, otherwise the socket address. A limit of 0
+ * disables limiting. State is process-local; for multi-instance deployments
+ * rely on Cloudflare's own rate limiting in front of the origin.
+ */
+function rateLimitGuard(perMinute: number): RequestHandler {
+  if (perMinute <= 0) {
+    return (_req, _res, next) => next();
+  }
+
+  const windowMs = 60_000;
+  const hits = new Map<string, { count: number; resetAt: number }>();
+
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = clientKey(req);
+
+    // Opportunistically drop expired buckets so the map cannot grow unbounded
+    // under a stream of distinct client keys.
+    if (hits.size > 10_000) {
+      for (const [entryKey, entry] of hits) {
+        if (entry.resetAt <= now) hits.delete(entryKey);
+      }
+    }
+
+    const existing = hits.get(key);
+    if (!existing || existing.resetAt <= now) {
+      hits.set(key, { count: 1, resetAt: now + windowMs });
+      next();
+      return;
+    }
+
+    if (existing.count >= perMinute) {
+      const retryAfter = Math.ceil((existing.resetAt - now) / 1000);
+      res.setHeader("Retry-After", String(retryAfter));
+      res.status(429).json({ error: "rate_limited" });
+      return;
+    }
+
+    existing.count += 1;
+    next();
+  };
+}
+
+function clientKey(req: Request): string {
+  return firstForwardedValue(req.header("cf-connecting-ip")) ?? req.ip ?? req.socket.remoteAddress ?? "unknown";
 }
 
 function installRequestDiagnostics(app: Express, config: AppConfig) {
@@ -279,9 +337,23 @@ function appendQueryParam(params: URLSearchParams, key: string, value: unknown) 
 }
 
 function mcpResourceUrl(req: Request, config: AppConfig) {
-  const host = firstForwardedValue(req.header("x-forwarded-host")) ?? req.header("host") ?? `${config.host}:${config.port}`;
+  const requestedHost = firstForwardedValue(req.header("x-forwarded-host")) ?? req.header("host");
+  const host = trustedHost(requestedHost, config) ?? `${config.host}:${config.port}`;
   const proto = firstForwardedValue(req.header("x-forwarded-proto")) ?? (req.secure ? "https" : req.protocol);
   return new URL(config.mcpPath, `${proto}://${host}`).toString();
+}
+
+// Only echo a client-supplied (and therefore spoofable) Host/X-Forwarded-Host
+// back into OAuth metadata when it matches the configured allow-list. Without an
+// allow-list we trust the header as before, since the public host is unknown.
+function trustedHost(requestedHost: string | undefined, config: AppConfig): string | undefined {
+  if (!requestedHost) return undefined;
+  if (config.allowedHosts.size === 0) return requestedHost;
+  const hostname = requestedHost.split(":")[0]?.toLowerCase();
+  if (config.allowedHosts.has(requestedHost.toLowerCase()) || (hostname && config.allowedHosts.has(hostname))) {
+    return requestedHost;
+  }
+  return undefined;
 }
 
 function firstForwardedValue(value: string | undefined) {
@@ -296,7 +368,12 @@ async function handleMcpPost(
   try {
     const server = createObsidianMcpServer(config, req.cloudflareAccess);
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined
+      sessionIdGenerator: undefined,
+      // Validate the Host/Origin headers when an allow-list is configured, blocking
+      // DNS-rebinding attacks that try to reach the origin under an unexpected name.
+      enableDnsRebindingProtection: config.allowedHosts.size > 0 || config.allowedOrigins.size > 0,
+      allowedHosts: config.allowedHosts.size > 0 ? [...config.allowedHosts] : undefined,
+      allowedOrigins: config.allowedOrigins.size > 0 ? [...config.allowedOrigins] : undefined
     });
 
     res.on("close", () => {
@@ -390,17 +467,6 @@ function getSessionId(req: Request): string | undefined {
   const header = req.headers["mcp-session-id"];
   if (Array.isArray(header)) return header[0];
   return header;
-}
-
-function mcpError(message: string) {
-  return {
-    jsonrpc: "2.0",
-    error: {
-      code: -32000,
-      message
-    },
-    id: null
-  };
 }
 
 function sendInternalError(res: Response, error: unknown) {

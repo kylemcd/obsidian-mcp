@@ -92,11 +92,13 @@ Environment variables:
 | `VAULT_PATH` | current working directory | Obsidian vault root. |
 | `VAULT_NAME` | `Obsidian` | Vault name reported by `vault_status`. |
 | `READ_ONLY` | `true` | Disables `write_note` and `append_note` unless set to `false`, `0`, `no`, or `off`. |
-| `ALLOWED_ORIGINS` | empty | Optional comma-separated browser Origin allowlist. Empty allows all origins. |
+| `ALLOWED_ORIGINS` | empty | Optional comma-separated browser Origin allowlist. Empty allows all origins. A non-empty value also enables Origin validation on the MCP transport. |
+| `ALLOWED_HOSTS` | empty | Optional comma-separated `Host` header allowlist for DNS-rebinding protection. Must match the exact Host the origin receives, including a non-standard port. Empty disables Host validation. |
+| `RATE_LIMIT_PER_MINUTE` | `300` | Per-client request budget for the MCP and SSE endpoints, keyed by `cf-connecting-ip`. `0` disables the limiter. |
 | `MCP_APP_RESOURCE_DOMAIN` | unset | Explicit MCP Apps resource sandbox domain. |
 | `MCP_PUBLIC_URL` | unset | Public MCP URL used to derive a Claude MCP Apps resource domain. |
 | `PUBLIC_MCP_URL` | unset | Alternate public MCP URL used to derive a Claude MCP Apps resource domain. |
-| `CF_ACCESS_REQUIRED` | derived | Requires Cloudflare Access validation when true. Defaults to true when team domain and audience are configured. |
+| `CF_ACCESS_REQUIRED` | derived | Requires Cloudflare Access validation when true. Defaults to true when team domain and audience are configured. See [Security configuration](#security-configuration) for the fail-closed startup rules. |
 | `CF_ACCESS_TEAM_DOMAIN` | unset | Cloudflare Access team domain, with or without `https://`. |
 | `TEAM_DOMAIN` | unset | Alternate name for `CF_ACCESS_TEAM_DOMAIN`. |
 | `CF_ACCESS_AUD` | unset | Cloudflare Access application audience. |
@@ -104,6 +106,60 @@ Environment variables:
 | `CF_ACCESS_ALLOWED_EMAILS` | empty | Optional comma-separated email allowlist after JWT validation. |
 
 Truthy boolean values are `1`, `true`, `yes`, and `on`.
+
+## Security configuration
+
+The server protects the vault in layers. The first two matter most; the rest are
+defense in depth.
+
+### Authentication fails closed
+
+The server refuses to start in misconfigured states rather than silently serving
+the vault without authentication:
+
+- If `CF_ACCESS_REQUIRED=true` but `CF_ACCESS_TEAM_DOMAIN` or `CF_ACCESS_AUD` is
+  missing, startup throws — the origin will not accept tokens it cannot verify.
+- If authentication resolves to off (no team domain/audience and
+  `CF_ACCESS_REQUIRED` is not explicitly set) and `HOST` is **not** loopback,
+  startup throws. Bind to `127.0.0.1` for local development, or set
+  `CF_ACCESS_REQUIRED=false` to run unauthenticated on a public interface on
+  purpose.
+
+Note that this is a behavioral change: a deploy that sets a non-loopback `HOST`
+without configuring Access now errors at boot until you either configure
+Cloudflare Access or explicitly opt out with `CF_ACCESS_REQUIRED=false`.
+
+### Identity allowlist
+
+When `CF_ACCESS_REQUIRED=true`, every identity your Cloudflare Access policy
+admits can use the vault unless you narrow it. Set `CF_ACCESS_ALLOWED_EMAILS` to
+restrict access to specific users (matched case-insensitively against the `email`
+claim). The server logs a warning at startup when Access is required but no email
+allowlist is configured.
+
+### Path containment
+
+All tool paths are normalized and rejected if they escape the vault root, are
+absolute, or are not Markdown. In addition, reads and writes resolve symlinks on
+the target's deepest existing ancestor and re-check containment, so a symlink
+inside the vault that points elsewhere cannot be used to read or write outside
+the vault root.
+
+### Network boundary
+
+- `ALLOWED_ORIGINS` is a browser Origin allowlist. A non-empty value also enables
+  Origin validation on the MCP transport. Requests without an `Origin` header
+  (typical of non-browser MCP clients) are still allowed.
+- `ALLOWED_HOSTS` enables `Host`-header validation to block DNS-rebinding
+  attacks. Set it to the exact Host the origin receives — for example
+  `ALLOWED_HOSTS=obsidian-mcp.example.com` for standard HTTPS, adding loopback
+  entries such as `127.0.0.1:8787,localhost:8787` if you also reach it locally.
+  Include a port only when it actually appears in the Host header. The Host the
+  origin receives is used for OAuth resource metadata only when it is on this
+  allowlist; otherwise the configured `HOST`/`PORT` is used.
+- `RATE_LIMIT_PER_MINUTE` caps requests per client (keyed by `cf-connecting-ip`).
+  This is a process-local backstop; Cloudflare's own rate limiting should be the
+  primary control in front of the origin.
 
 ## Local Development
 
@@ -153,5 +209,8 @@ CF_ACCESS_REQUIRED=true
 CF_ACCESS_TEAM_DOMAIN=https://<team>.cloudflareaccess.com
 CF_ACCESS_AUD=<access-application-aud>
 CF_ACCESS_ALLOWED_EMAILS=<user@example.com>
+ALLOWED_ORIGINS=https://claude.ai
+ALLOWED_HOSTS=obsidian-mcp.example.com
+RATE_LIMIT_PER_MINUTE=300
 MCP_PUBLIC_URL=https://obsidian-mcp.example.com/mcp
 ```

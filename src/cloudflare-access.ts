@@ -88,7 +88,8 @@ export function cloudflareAccessMiddleware(config: CloudflareAccessConfig): Requ
     try {
       const { payload } = await jwtVerify(accessToken.token, getJwks(config.teamDomain), {
         issuer: config.teamDomain,
-        audience: config.audience
+        audience: config.audience,
+        algorithms: ["RS256", "ES256"]
       });
 
       const email = claimAsString(payload, "email");
@@ -108,11 +109,10 @@ export function cloudflareAccessMiddleware(config: CloudflareAccessConfig): Requ
       next();
     } catch (error) {
       const detail = error instanceof Error ? error.message : "JWT verification failed";
+      // Log the verification failure reason server-side only; returning it to the
+      // client leaks whether a token was expired, wrong-audience, bad-signature, etc.
       logAccessDenied(req, "invalid_cloudflare_access_token", detail);
-      res.status(403).json({
-        error: "invalid_cloudflare_access_token",
-        detail
-      });
+      res.status(403).json({ error: "invalid_cloudflare_access_token" });
     }
   };
 }
