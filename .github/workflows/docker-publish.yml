@@ -14,6 +14,11 @@ on:
       - ".github/workflows/docker-publish.yml"
   workflow_dispatch: {}
 
+# Run the JavaScript-based actions on Node.js 24 instead of the deprecated
+# Node.js 20 runtime.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   check-version:
     runs-on: ubuntu-latest
