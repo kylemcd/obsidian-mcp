@@ -8,6 +8,60 @@ The server is designed to run behind Cloudflare Access Managed OAuth. Cloudflare
 handles the user OAuth flow; the origin validates Cloudflare Access assertions
 when `CF_ACCESS_REQUIRED=true`.
 
+## Installation
+
+A prebuilt, multi-arch image (`linux/amd64`, `linux/arm64`) is published to the
+GitHub Container Registry:
+
+```
+ghcr.io/kylemcd/obsidian-mcp:latest
+```
+
+Pull it:
+
+```bash
+docker pull ghcr.io/kylemcd/obsidian-mcp:latest
+```
+
+Use a pinned version tag (for example `:0.1.1`) for reproducible deploys;
+`:latest` always points at the newest release.
+
+### Quick start
+
+Run the server with your vault mounted at `/vault`. The container binds to
+`0.0.0.0`, so it will not start unauthenticated unless you opt out explicitly —
+fine for a local trial, but configure Cloudflare Access for any real deployment.
+
+```bash
+docker run --rm \
+  -p 127.0.0.1:8787:8787 \
+  -v /path/to/vault:/vault:ro \
+  -e CF_ACCESS_REQUIRED=false \
+  ghcr.io/kylemcd/obsidian-mcp:latest
+
+curl http://127.0.0.1:8787/health
+```
+
+### Production (Cloudflare Access)
+
+```bash
+docker run -d --name obsidian-mcp --restart unless-stopped \
+  -p 127.0.0.1:8787:8787 \
+  -v /path/to/vault:/vault:ro \
+  -e CF_ACCESS_REQUIRED=true \
+  -e CF_ACCESS_TEAM_DOMAIN=https://<team>.cloudflareaccess.com \
+  -e CF_ACCESS_AUD=<access-application-aud> \
+  -e CF_ACCESS_ALLOWED_EMAILS=you@example.com \
+  -e ALLOWED_HOSTS=obsidian-mcp.example.com \
+  ghcr.io/kylemcd/obsidian-mcp:latest
+```
+
+Front the loopback-bound port with Cloudflare Tunnel (or another reverse proxy)
+and protect the hostname with a Cloudflare Access application. See
+[Production Shape](#production-shape) for the full topology, the
+[Configuration](#configuration) table for every variable, and the [Docker](#docker)
+section for Compose, building locally, and the release flow.
+
 ## Features
 
 - List, read, and search Markdown notes in an Obsidian vault.
@@ -163,22 +217,12 @@ the vault root.
 
 ## Docker
 
-A prebuilt image is published to the GitHub Container Registry on each release
-tag. This is the recommended way to run the server on a host.
+Running the server on a host is the recommended deployment. See
+[Installation](#installation) for `docker run` examples; this section covers
+Compose, image details, building locally, and the release flow.
 
-```bash
-docker run --rm \
-  -p 127.0.0.1:8787:8787 \
-  -v /path/to/vault:/vault:ro \
-  -e CF_ACCESS_REQUIRED=true \
-  -e CF_ACCESS_TEAM_DOMAIN=https://<team>.cloudflareaccess.com \
-  -e CF_ACCESS_AUD=<access-application-aud> \
-  -e CF_ACCESS_ALLOWED_EMAILS=you@example.com \
-  ghcr.io/kylemcd/obsidian-mcp:latest
-```
-
-Or with Compose — copy `docker-compose.yml`, edit the volume path and
-environment, then:
+With Compose — copy `docker-compose.yml`, edit the volume path and environment,
+then:
 
 ```bash
 docker compose up -d
