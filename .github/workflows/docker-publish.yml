@@ -1,0 +1,104 @@
+name: Publish Docker image
+
+# Publishes a multi-arch image to GHCR whenever the version in package.json
+# changes on main. Bump the version, merge to main, and CI does the rest:
+# build -> push (linux/amd64 + linux/arm64) -> git tag -> GitHub release.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "package.json"
+      - "Dockerfile"
+      - "src/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/docker-publish.yml"
+  workflow_dispatch: {}
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+      version: ${{ steps.check.outputs.version }}
+      minor: ${{ steps.check.outputs.minor }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need tags to detect whether this version was published
+
+      - name: Detect a new version
+        id: check
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "minor=${VERSION%.*}" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "::notice::v$VERSION already tagged; nothing to publish."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::v$VERSION is new; will build and publish."
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    needs: check-version
+    if: needs.check-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the git tag and GitHub release
+      packages: write # push to GHCR
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+      MINOR: ${{ needs.check-version.outputs.minor }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ env.VERSION }}
+            type=raw,value=${{ env.MINOR }}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Tag the release
+        run: |
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --generate-notes \
+            --target "${{ github.sha }}"

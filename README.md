@@ -161,6 +161,70 @@ the vault root.
   This is a process-local backstop; Cloudflare's own rate limiting should be the
   primary control in front of the origin.
 
+## Docker
+
+A prebuilt image is published to the GitHub Container Registry on each release
+tag. This is the recommended way to run the server on a host.
+
+```bash
+docker run --rm \
+  -p 127.0.0.1:8787:8787 \
+  -v /path/to/vault:/vault:ro \
+  -e CF_ACCESS_REQUIRED=true \
+  -e CF_ACCESS_TEAM_DOMAIN=https://<team>.cloudflareaccess.com \
+  -e CF_ACCESS_AUD=<access-application-aud> \
+  -e CF_ACCESS_ALLOWED_EMAILS=you@example.com \
+  ghcr.io/kylemcd/obsidian-mcp:latest
+```
+
+Or with Compose — copy `docker-compose.yml`, edit the volume path and
+environment, then:
+
+```bash
+docker compose up -d
+```
+
+Image details:
+
+- Mount the vault at `/vault` (the default `VAULT_PATH`). Use `:ro` unless you
+  set `READ_ONLY=false` and intend to allow writes.
+- The container binds to `HOST=0.0.0.0` so the published port works. Because
+  that is a non-loopback bind, the server **refuses to start without
+  authentication** unless you set `CF_ACCESS_REQUIRED=false` on purpose (see
+  [Security configuration](#security-configuration)). Configure Cloudflare
+  Access for any real deployment.
+- The host port is mapped to `127.0.0.1` in the examples so only a local reverse
+  proxy or Cloudflare Tunnel can reach it. Front it with Cloudflare Access for
+  remote use.
+- A `HEALTHCHECK` polls `/health`; `docker ps` and Compose report health status.
+
+Build the image yourself instead of pulling:
+
+```bash
+docker build -t obsidian-mcp .
+```
+
+### Releasing
+
+Releases are driven by the `version` field in `package.json`. Bump it and merge
+to `main`; the `Publish Docker image` workflow detects the new version and then:
+
+1. builds and pushes multi-arch (`linux/amd64`, `linux/arm64`) images to GHCR,
+   tagged `:<version>`, `:<major.minor>`, and `:latest`;
+2. pushes a `v<version>` git tag; and
+3. creates a GitHub release with generated notes.
+
+```bash
+# example: cut version 0.2.0
+npm version minor --no-git-tag-version   # or edit package.json by hand
+git commit -am "chore: release v0.2.0"
+git push origin main
+```
+
+The workflow is idempotent: if a `v<version>` tag already exists it does
+nothing, so re-running or pushing unrelated commits will not republish. You can
+also trigger it manually from the Actions tab (`workflow_dispatch`).
+
 ## Local Development
 
 ```bash

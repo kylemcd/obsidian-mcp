@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "description": "Obsidian vault MCP server intended to sit behind Cloudflare Access Managed OAuth.",
-  "license": "UNLICENSED",
+  "license": "MIT",
+  "packageManager": "pnpm@10.6.2",
   "engines": {
     "node": ">=22"
   },

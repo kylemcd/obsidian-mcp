@@ -1,0 +1,34 @@
+services:
+  obsidian-mcp:
+    image: ghcr.io/kylemcd/obsidian-mcp:latest
+    # To build the image locally instead of pulling, comment out `image:` above
+    # and uncomment the line below:
+    # build: .
+    restart: unless-stopped
+    # Bind to loopback on the host so only a local reverse proxy / Cloudflare
+    # Tunnel can reach it. Drop the 127.0.0.1 prefix only if you front it some
+    # other way.
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      # Mount your local Markdown vault read-only. Make it read-write only if
+      # you set READ_ONLY=false below.
+      - /path/to/vault:/vault:ro
+    environment:
+      VAULT_NAME: Obsidian
+      READ_ONLY: "true"
+      # --- Authentication ---
+      # Production: validate Cloudflare Access assertions.
+      CF_ACCESS_REQUIRED: "true"
+      CF_ACCESS_TEAM_DOMAIN: "https://<team>.cloudflareaccess.com"
+      CF_ACCESS_AUD: "<access-application-aud>"
+      CF_ACCESS_ALLOWED_EMAILS: "you@example.com"
+      # The container binds to 0.0.0.0, so the server refuses to start
+      # unauthenticated unless you explicitly opt out with:
+      #   CF_ACCESS_REQUIRED: "false"
+      # --- Network hardening (optional) ---
+      ALLOWED_ORIGINS: "https://claude.ai"
+      ALLOWED_HOSTS: "obsidian-mcp.example.com"
+      RATE_LIMIT_PER_MINUTE: "300"
+    # Alternatively, keep secrets out of the compose file with an env file:
+    # env_file: .env
