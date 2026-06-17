@@ -197,6 +197,28 @@ describe("MCP Apps integration", () => {
     const result = await parseMcpResponse(response);
     expect(result.result.content[0].text).toContain("Projects/Cloudflare.md");
   });
+
+  it("terminates stateful MCP sessions without breaking later stateless calls", async () => {
+    await initialize();
+
+    const deleteResponse = await fetch(`${baseUrl}/mcp`, {
+      method: "DELETE",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "mcp-session-id": mcpSessionId!
+      }
+    });
+
+    expect(deleteResponse.status).toBe(200);
+
+    mcpSessionId = undefined;
+    const result = await callMcp("tools/call", {
+      name: "search_notes",
+      arguments: { query: "OAuth" }
+    });
+
+    expect(result.result.content[0].text).toContain("Projects/Cloudflare.md");
+  });
 });
 
 describe("Cloudflare Access OAuth compatibility", () => {

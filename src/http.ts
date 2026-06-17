@@ -406,9 +406,8 @@ async function handleStatefulMcpInitialize(
       sessions.set(sessionId, { transport, server });
       console.log("mcp_session_initialized", JSON.stringify({ sessionId, sessions: sessions.size }));
     },
-    onsessionclosed: async (sessionId) => {
+    onsessionclosed: (sessionId) => {
       sessions.delete(sessionId);
-      await server.close();
       console.log("mcp_session_closed", JSON.stringify({ sessionId, sessions: sessions.size }));
     },
     ...streamableHttpSecurityOptions(config)
@@ -420,7 +419,6 @@ async function handleStatefulMcpInitialize(
       sessions.delete(sessionId);
       console.log("mcp_transport_closed", JSON.stringify({ sessionId, sessions: sessions.size }));
     }
-    void server.close().catch((error) => console.error("mcp_server_close_error", error));
   };
 
   transport.onerror = (error) => {

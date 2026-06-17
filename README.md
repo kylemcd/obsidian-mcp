@@ -23,7 +23,7 @@ Pull it:
 docker pull ghcr.io/kylemcd/obsidian-mcp:latest
 ```
 
-Use a pinned version tag (for example `:0.1.2`) for reproducible deploys;
+Use a pinned version tag (for example `:0.1.3`) for reproducible deploys;
 `:latest` always points at the newest release.
 
 ### Quick start
