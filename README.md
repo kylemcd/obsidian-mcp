@@ -23,19 +23,21 @@ Pull it:
 docker pull ghcr.io/kylemcd/obsidian-mcp:latest
 ```
 
-Use a pinned version tag (for example `:0.1.3`) for reproducible deploys;
+Use a pinned version tag (for example `:0.2.0`) for reproducible deploys;
 `:latest` always points at the newest release.
 
 ### Quick start
 
-Run the server with your vault mounted at `/vault`. The container binds to
-`0.0.0.0`, so it will not start unauthenticated unless you opt out explicitly —
-fine for a local trial, but configure Cloudflare Access for any real deployment.
+Run the server against an already-synced local vault by disabling managed sync.
+The container binds to `0.0.0.0`, so it will not start unauthenticated unless
+you opt out explicitly — fine for a local trial, but configure Cloudflare Access
+for any real deployment.
 
 ```bash
 docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -v /path/to/vault:/vault:ro \
+  -e SYNC_ENABLED=false \
   -e CF_ACCESS_REQUIRED=false \
   ghcr.io/kylemcd/obsidian-mcp:latest
 
@@ -47,7 +49,9 @@ curl http://127.0.0.1:8787/health
 ```bash
 docker run -d --name obsidian-mcp --restart unless-stopped \
   -p 127.0.0.1:8787:8787 \
-  -v /path/to/vault:/vault:ro \
+  -v obsidian-mcp-vault:/vault \
+  -e OBSIDIAN_REMOTE_VAULT="<remote-vault-name-or-id>" \
+  -e OBSIDIAN_AUTH_TOKEN="<obsidian-auth-token>" \
   -e CF_ACCESS_REQUIRED=true \
   -e CF_ACCESS_TEAM_DOMAIN=https://<team>.cloudflareaccess.com \
   -e CF_ACCESS_AUD=<access-application-aud> \
@@ -80,6 +84,8 @@ Managed OAuth settings explicitly instead of relying on defaults:
 ## Features
 
 - List, read, and search Markdown notes in an Obsidian vault.
+- Manage Obsidian Headless Sync by default, with an opt-out for externally
+  synced vaults.
 - Create, overwrite, and append Markdown notes when `READ_ONLY=false`.
 - Reject paths that escape the vault root and only operate on Markdown note
   paths.
@@ -161,6 +167,17 @@ Environment variables:
 | `VAULT_PATH` | current working directory | Obsidian vault root. |
 | `VAULT_NAME` | `Obsidian` | Vault name reported by `vault_status`. |
 | `READ_ONLY` | `true` | Disables `write_note` and `append_note` unless set to `false`, `0`, `no`, or `off`. |
+| `SYNC_ENABLED` | `true` | Runs managed Obsidian Headless Sync inside this process. Set to `false` when another service already keeps `VAULT_PATH` synced. |
+| `SYNC_AUTO_SETUP` | `true` | Runs `ob sync-setup` automatically when `VAULT_PATH` is not already configured. |
+| `OBSIDIAN_REMOTE_VAULT` | unset | Remote Obsidian Sync vault name or ID for first-time managed setup. Also accepted as `SYNC_REMOTE_VAULT`. |
+| `OBSIDIAN_AUTH_TOKEN` | unset | Passed through to `obsidian-headless` for non-interactive authentication when supported by that client. |
+| `OBSIDIAN_SYNC_PASSWORD` | unset | Optional end-to-end encryption password passed to `ob sync-setup --password`. Also accepted as `SYNC_PASSWORD`. |
+| `OBSIDIAN_DEVICE_NAME` | `obsidian-mcp` | Device name passed to `ob sync-setup --device-name`. Also accepted as `SYNC_DEVICE_NAME`. |
+| `SYNC_COMMAND` | `ob` | Command used to run Obsidian Headless. The Docker image includes `ob` on `PATH`. |
+| `SYNC_RESTART_DELAY_MS` | `10000` | Delay before retrying setup or restarting sync after an exit. |
+| `SYNC_STALE_AFTER_MS` | `600000` | Restart managed sync when it produces no output for this long. |
+| `SYNC_RUNTIME_MAX_MS` | `21600000` | Recycle managed sync after this long even if it still appears healthy. |
+| `SYNC_REQUIRED_FOR_READY` | `true` | Makes `/ready` return `503` until managed sync is configured, running, and fully synced. |
 | `ALLOWED_ORIGINS` | empty | Optional comma-separated browser Origin allowlist. Empty allows all origins. A non-empty value also enables Origin validation on the MCP transport. |
 | `ALLOWED_HOSTS` | empty | Optional comma-separated `Host` header allowlist for DNS-rebinding protection. Must match the exact Host the origin receives, including a non-standard port. Empty disables Host validation. |
 | `RATE_LIMIT_PER_MINUTE` | `300` | Per-client request budget for the MCP and SSE endpoints, keyed by `cf-connecting-ip`. `0` disables the limiter. |
@@ -245,8 +262,12 @@ docker compose up -d
 
 Image details:
 
-- Mount the vault at `/vault` (the default `VAULT_PATH`). Use `:ro` unless you
-  set `READ_ONLY=false` and intend to allow writes.
+- Mount or create the vault at `/vault` (the image default `VAULT_PATH`).
+- Managed sync is enabled by default. Use a writable volume so
+  `obsidian-headless` can download and update vault files.
+- Set `SYNC_ENABLED=false` for an externally synced vault. In that mode, a
+  read-only mount is fine unless you set `READ_ONLY=false` and intend to allow
+  MCP write tools.
 - The container binds to `HOST=0.0.0.0` so the published port works. Because
   that is a non-loopback bind, the server **refuses to start without
   authentication** unless you set `CF_ACCESS_REQUIRED=false` on purpose (see
@@ -255,7 +276,8 @@ Image details:
 - The host port is mapped to `127.0.0.1` in the examples so only a local reverse
   proxy or Cloudflare Tunnel can reach it. Front it with Cloudflare Access for
   remote use.
-- A `HEALTHCHECK` polls `/health`; `docker ps` and Compose report health status.
+- A `HEALTHCHECK` polls `/ready`; `docker ps` and Compose report unhealthy
+  status when the vault or managed sync is not ready.
 
 Build the image yourself instead of pulling:
 
@@ -289,7 +311,7 @@ also trigger it manually from the Actions tab (`workflow_dispatch`).
 ```bash
 cp .env.example .env
 pnpm install
-READ_ONLY=true CF_ACCESS_REQUIRED=false VAULT_PATH=/path/to/vault pnpm dev
+SYNC_ENABLED=false READ_ONLY=true CF_ACCESS_REQUIRED=false VAULT_PATH=/path/to/vault pnpm dev
 ```
 
 Health checks:
@@ -317,21 +339,40 @@ The usual deployment shape is:
 
 ## Vault Sync
 
-`VAULT_PATH` must point at a local filesystem copy of the Obsidian vault. This
-server does not sync a vault by itself; it reads and writes the Markdown files
-already present at that path.
+`VAULT_PATH` must point at a local filesystem copy of the Obsidian vault. In the
+Docker image, managed sync is enabled by default and uses Obsidian Headless to
+set up and run `ob sync --continuous` for that path. The server starts even when
+managed sync is not ready, but `/ready` returns `503` until the vault exists and
+sync has reached `Fully synced`.
 
-For hosted deployments, run a separate sync process that keeps the local vault
-current before starting this server. That can be an Obsidian headless sync
-service, Obsidian Sync running under a headless wrapper, Git, Syncthing, or any
-other mechanism that maintains a local Markdown vault directory.
+Use managed sync for the default hosted path:
+
+```bash
+SYNC_ENABLED=true
+VAULT_PATH=/vault
+OBSIDIAN_REMOTE_VAULT=<remote-vault-name-or-id>
+OBSIDIAN_AUTH_TOKEN=<token-used-by-obsidian-headless>
+OBSIDIAN_SYNC_PASSWORD=<optional-e2ee-password>
+```
+
+Use unmanaged mode when another process already keeps the local vault current,
+such as a separate systemd service, Git, Syncthing, or a host-level
+Obsidian Headless Sync setup:
+
+```bash
+SYNC_ENABLED=false
+VAULT_PATH=/path/to/already-synced/vault
+```
 
 Example production environment:
 
 ```bash
-VAULT_PATH=/path/to/vault
+VAULT_PATH=/vault
 VAULT_NAME=Obsidian
 READ_ONLY=true
+SYNC_ENABLED=true
+OBSIDIAN_REMOTE_VAULT=<remote-vault-name-or-id>
+OBSIDIAN_AUTH_TOKEN=<token-used-by-obsidian-headless>
 CF_ACCESS_REQUIRED=true
 CF_ACCESS_TEAM_DOMAIN=https://<team>.cloudflareaccess.com
 CF_ACCESS_AUD=<access-application-aud>

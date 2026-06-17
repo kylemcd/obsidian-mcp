@@ -11,12 +11,18 @@ services:
     ports:
       - "127.0.0.1:8787:8787"
     volumes:
-      # Mount your local Markdown vault read-only. Make it read-write only if
-      # you set READ_ONLY=false below.
-      - /path/to/vault:/vault:ro
+      # Managed sync writes the local synced vault here. To bring your own
+      # already-synced vault instead, mount that path and set SYNC_ENABLED=false.
+      - obsidian-vault:/vault
     environment:
       VAULT_NAME: Obsidian
       READ_ONLY: "true"
+      # --- Obsidian Headless Sync ---
+      # Managed sync is enabled by default. Set SYNC_ENABLED=false if another
+      # service already keeps /vault synced.
+      SYNC_ENABLED: "true"
+      OBSIDIAN_REMOTE_VAULT: "<remote-vault-name-or-id>"
+      # Keep OBSIDIAN_AUTH_TOKEN and OBSIDIAN_SYNC_PASSWORD in .env when needed.
       # --- Authentication ---
       # Production: validate Cloudflare Access assertions.
       CF_ACCESS_REQUIRED: "true"
@@ -32,3 +38,6 @@ services:
       RATE_LIMIT_PER_MINUTE: "300"
     # Alternatively, keep secrets out of the compose file with an env file:
     # env_file: .env
+
+volumes:
+  obsidian-vault:

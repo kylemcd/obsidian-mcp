@@ -26,6 +26,7 @@ beforeEach(async () => {
     VAULT_PATH: tempDir,
     VAULT_NAME: "TestVault",
     READ_ONLY: "true",
+    SYNC_ENABLED: "false",
     MCP_APP_RESOURCE_DOMAIN: "test.claudemcpcontent.com",
     CF_ACCESS_REQUIRED: "false",
     CF_ACCESS_TEAM_DOMAIN: "https://example.cloudflareaccess.com",
@@ -319,6 +320,7 @@ async function startServer(overrides: Record<string, string>) {
     VAULT_PATH: tempDir,
     VAULT_NAME: "TestVault",
     CF_ACCESS_REQUIRED: "false",
+    SYNC_ENABLED: "false",
     ...overrides
   });
   const { app } = createApp(config);

@@ -15,11 +15,25 @@ export type AppConfig = {
   vaultPath: string;
   vaultName: string;
   readOnly: boolean;
+  sync: ManagedSyncConfig;
   allowedOrigins: Set<string>;
   allowedHosts: Set<string>;
   rateLimitPerMinute: number;
   mcpAppResourceDomain?: string;
   cloudflareAccess: CloudflareAccessConfig;
+};
+
+export type ManagedSyncConfig = {
+  enabled: boolean;
+  autoSetup: boolean;
+  command: string;
+  remoteVault?: string;
+  syncPassword?: string;
+  deviceName: string;
+  restartDelayMs: number;
+  staleAfterMs: number;
+  runtimeMaxMs: number;
+  requiredForReady: boolean;
 };
 
 function parseBool(value: string | undefined, fallback: boolean): boolean {
@@ -54,6 +68,15 @@ function parseNonNegativeInt(value: string | undefined, fallback: number): numbe
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0) {
     throw new Error(`Expected a non-negative integer; got ${value}`);
+  }
+  return parsed;
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number, name: string): number {
+  if (value == null || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer; got ${value}`);
   }
   return parsed;
 }
@@ -119,6 +142,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     vaultPath: path.resolve(env.VAULT_PATH ?? process.cwd()),
     vaultName: env.VAULT_NAME ?? "Obsidian",
     readOnly: parseBool(env.READ_ONLY, true),
+    sync: {
+      enabled: parseBool(env.SYNC_ENABLED, true),
+      autoSetup: parseBool(env.SYNC_AUTO_SETUP, true),
+      command: normalizeOptionalValue(env.SYNC_COMMAND) ?? "ob",
+      remoteVault: normalizeOptionalValue(env.OBSIDIAN_REMOTE_VAULT ?? env.SYNC_REMOTE_VAULT),
+      syncPassword: normalizeOptionalValue(env.OBSIDIAN_SYNC_PASSWORD ?? env.SYNC_PASSWORD),
+      deviceName: normalizeOptionalValue(env.OBSIDIAN_DEVICE_NAME ?? env.SYNC_DEVICE_NAME) ?? "obsidian-mcp",
+      restartDelayMs: parsePositiveInt(env.SYNC_RESTART_DELAY_MS, 10_000, "SYNC_RESTART_DELAY_MS"),
+      staleAfterMs: parsePositiveInt(env.SYNC_STALE_AFTER_MS, 600_000, "SYNC_STALE_AFTER_MS"),
+      runtimeMaxMs: parsePositiveInt(env.SYNC_RUNTIME_MAX_MS, 21_600_000, "SYNC_RUNTIME_MAX_MS"),
+      requiredForReady: parseBool(env.SYNC_REQUIRED_FOR_READY, true)
+    },
     allowedOrigins: new Set(splitCsv(env.ALLOWED_ORIGINS)),
     allowedHosts: new Set(splitCsv(env.ALLOWED_HOSTS).map((host) => host.toLowerCase())),
     rateLimitPerMinute: parseNonNegativeInt(env.RATE_LIMIT_PER_MINUTE, 300),

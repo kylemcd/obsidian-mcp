@@ -2,14 +2,21 @@ import { createServer } from "node:http";
 
 import { loadConfig } from "./config.js";
 import { createApp } from "./http.js";
+import { ManagedSync } from "./managed-sync.js";
 
 const config = loadConfig();
-const { app, sessions, sseSessions } = createApp(config);
+const managedSync = new ManagedSync(config.sync, config.vaultPath);
+managedSync.start();
+
+const { app, sessions, sseSessions } = createApp(config, { managedSync });
 const server = createServer(app);
 
 server.listen(config.port, config.host, () => {
   console.log(`obsidian-mcp listening on http://${config.host}:${config.port}${config.mcpPath}`);
-  console.log(`vault=${config.vaultPath} readOnly=${config.readOnly} cloudflareAccessRequired=${config.cloudflareAccess.required}`);
+  console.log(
+    `vault=${config.vaultPath} readOnly=${config.readOnly} syncEnabled=${config.sync.enabled} ` +
+      `cloudflareAccessRequired=${config.cloudflareAccess.required}`
+  );
 });
 
 async function shutdown(signal: string) {
@@ -27,6 +34,11 @@ async function shutdown(signal: string) {
     } catch (error) {
       console.error(`failed to close SSE MCP session ${sessionId}:`, error);
     }
+  }
+  try {
+    await managedSync.stop();
+  } catch (error) {
+    console.error("failed to stop managed sync:", error);
   }
 
   server.close((error) => {

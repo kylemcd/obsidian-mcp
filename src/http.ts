@@ -8,6 +8,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import { cloudflareAccessMiddleware } from "./cloudflare-access.js";
 import type { AppConfig } from "./config.js";
+import type { ManagedSyncSnapshot } from "./managed-sync.js";
 import { createObsidianMcpServer } from "./mcp.js";
 import { originGuard } from "./origin-guard.js";
 import { Vault } from "./vault.js";
@@ -28,10 +29,17 @@ export type AppHandle = {
   sseSessions: Map<string, SseSession>;
 };
 
+export type AppOptions = {
+  managedSync?: {
+    snapshot(): ManagedSyncSnapshot;
+    isReady(): boolean;
+  };
+};
+
 const ssePath = "/sse";
 const sseMessagesPath = "/messages";
 
-export function createApp(config: AppConfig): AppHandle {
+export function createApp(config: AppConfig, options: AppOptions = {}): AppHandle {
   const app = express();
   const sessions = new Map<string, McpSession>();
   const sseSessions = new Map<string, SseSession>();
@@ -56,6 +64,7 @@ export function createApp(config: AppConfig): AppHandle {
       ok: true,
       name: "obsidian-mcp",
       readOnly: config.readOnly,
+      sync: options.managedSync?.snapshot() ?? disabledSyncSnapshot(config.sync.requiredForReady),
       cloudflareAccessRequired: config.cloudflareAccess.required
     });
   });
@@ -63,7 +72,17 @@ export function createApp(config: AppConfig): AppHandle {
   app.get("/ready", async (_req, res) => {
     try {
       await new Vault(config.vaultPath).assertReady();
-      res.json({ ok: true, vaultPath: config.vaultPath });
+      const sync = options.managedSync?.snapshot() ?? disabledSyncSnapshot(config.sync.requiredForReady);
+      if (config.sync.enabled && config.sync.requiredForReady && !options.managedSync?.isReady()) {
+        res.status(503).json({
+          ok: false,
+          vaultPath: config.vaultPath,
+          sync,
+          error: sync.lastError ?? `Managed sync is not ready: ${sync.state}`
+        });
+        return;
+      }
+      res.json({ ok: true, vaultPath: config.vaultPath, sync });
     } catch (error) {
       res.status(503).json({
         ok: false,
@@ -99,6 +118,18 @@ export function createApp(config: AppConfig): AppHandle {
   });
 
   return { app, sessions, sseSessions };
+}
+
+function disabledSyncSnapshot(requiredForReady: boolean): ManagedSyncSnapshot {
+  return {
+    enabled: false,
+    requiredForReady,
+    state: "disabled",
+    running: false,
+    configured: false,
+    ready: true,
+    restartCount: 0
+  };
 }
 
 /**
