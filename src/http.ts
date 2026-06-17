@@ -1,7 +1,10 @@
+import { randomUUID } from "node:crypto";
+
 import express, { type Express, type Request, type RequestHandler, type Response } from "express";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import { cloudflareAccessMiddleware } from "./cloudflare-access.js";
 import type { AppConfig } from "./config.js";
@@ -76,7 +79,7 @@ export function createApp(config: AppConfig): AppHandle {
   });
 
   app.post(config.mcpPath, rateLimiter, browserOriginGuard, accessGuard, async (req, res) => {
-    await handleMcpPost(config, req, res);
+    await handleMcpPost(config, sessions, req, res);
   });
 
   app.get(config.mcpPath, rateLimiter, browserOriginGuard, accessGuard, async (req, res) => {
@@ -362,18 +365,81 @@ function firstForwardedValue(value: string | undefined) {
 
 async function handleMcpPost(
   config: AppConfig,
+  sessions: Map<string, McpSession>,
   req: Request,
   res: Response
 ) {
   try {
+    const sessionId = getSessionId(req);
+    const existingSession = sessionId ? sessions.get(sessionId) : undefined;
+    if (existingSession) {
+      await existingSession.transport.handleRequest(req, res, req.body);
+      return;
+    }
+
+    if (containsInitializeRequest(req.body)) {
+      await handleStatefulMcpInitialize(config, sessions, req, res);
+      return;
+    }
+
+    if (sessionId) {
+      console.warn("mcp_session_not_found_fallback", JSON.stringify({ sessionId }));
+    }
+
+    await handleStatelessMcpPost(config, req, res);
+  } catch (error) {
+    sendInternalError(res, error);
+  }
+}
+
+async function handleStatefulMcpInitialize(
+  config: AppConfig,
+  sessions: Map<string, McpSession>,
+  req: Request,
+  res: Response
+) {
+  const server = createObsidianMcpServer(config, req.cloudflareAccess);
+  let transport: StreamableHTTPServerTransport;
+  transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    onsessioninitialized: (sessionId) => {
+      sessions.set(sessionId, { transport, server });
+      console.log("mcp_session_initialized", JSON.stringify({ sessionId, sessions: sessions.size }));
+    },
+    onsessionclosed: async (sessionId) => {
+      sessions.delete(sessionId);
+      await server.close();
+      console.log("mcp_session_closed", JSON.stringify({ sessionId, sessions: sessions.size }));
+    },
+    ...streamableHttpSecurityOptions(config)
+  });
+
+  transport.onclose = () => {
+    const sessionId = transport.sessionId;
+    if (sessionId) {
+      sessions.delete(sessionId);
+      console.log("mcp_transport_closed", JSON.stringify({ sessionId, sessions: sessions.size }));
+    }
+    void server.close().catch((error) => console.error("mcp_server_close_error", error));
+  };
+
+  transport.onerror = (error) => {
+    console.error("mcp_transport_error", error);
+  };
+
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+}
+
+async function handleStatelessMcpPost(
+  config: AppConfig,
+  req: Request,
+  res: Response
+) {
     const server = createObsidianMcpServer(config, req.cloudflareAccess);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
-      // Validate the Host/Origin headers when an allow-list is configured, blocking
-      // DNS-rebinding attacks that try to reach the origin under an unexpected name.
-      enableDnsRebindingProtection: config.allowedHosts.size > 0 || config.allowedOrigins.size > 0,
-      allowedHosts: config.allowedHosts.size > 0 ? [...config.allowedHosts] : undefined,
-      allowedOrigins: config.allowedOrigins.size > 0 ? [...config.allowedOrigins] : undefined
+      ...streamableHttpSecurityOptions(config)
     });
 
     res.on("close", () => {
@@ -387,9 +453,21 @@ async function handleMcpPost(
 
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
-  } catch (error) {
-    sendInternalError(res, error);
-  }
+}
+
+function streamableHttpSecurityOptions(config: AppConfig) {
+  return {
+    // Validate the Host/Origin headers when an allow-list is configured, blocking
+    // DNS-rebinding attacks that try to reach the origin under an unexpected name.
+    enableDnsRebindingProtection: config.allowedHosts.size > 0 || config.allowedOrigins.size > 0,
+    allowedHosts: config.allowedHosts.size > 0 ? [...config.allowedHosts] : undefined,
+    allowedOrigins: config.allowedOrigins.size > 0 ? [...config.allowedOrigins] : undefined
+  };
+}
+
+function containsInitializeRequest(body: unknown) {
+  const messages = Array.isArray(body) ? body : [body];
+  return messages.some((message) => isInitializeRequest(message));
 }
 
 async function handleMcpSessionRequest(sessions: Map<string, McpSession>, req: Request, res: Response) {

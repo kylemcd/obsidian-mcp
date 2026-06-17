@@ -23,7 +23,7 @@ Pull it:
 docker pull ghcr.io/kylemcd/obsidian-mcp:latest
 ```
 
-Use a pinned version tag (for example `:0.1.1`) for reproducible deploys;
+Use a pinned version tag (for example `:0.1.2`) for reproducible deploys;
 `:latest` always points at the newest release.
 
 ### Quick start
@@ -61,6 +61,21 @@ and protect the hostname with a Cloudflare Access application. See
 [Production Shape](#production-shape) for the full topology, the
 [Configuration](#configuration) table for every variable, and the [Docker](#docker)
 section for Compose, building locally, and the release flow.
+
+For long-lived Claude connector sessions, configure the Access application's
+Managed OAuth settings explicitly instead of relying on defaults:
+
+- Enable Managed OAuth.
+- Enable Dynamic Client Registration.
+- Allow Claude redirect URIs:
+  - `https://claude.ai/api/mcp/auth_callback`
+  - `https://claude.com/api/mcp/auth_callback`
+- Set a long Managed OAuth grant session duration, for example `720h` for about
+  30 days.
+- Set an access token lifetime that your MCP client refreshes reliably. A short
+  value such as `15m` follows Cloudflare's default guidance; if a client
+  repeatedly disconnects or prompts for re-auth because token refresh is flaky,
+  use a longer value such as `24h`.
 
 ## Features
 
@@ -292,8 +307,12 @@ The usual deployment shape is:
    equivalent reverse proxy.
 2. A Cloudflare Access self-hosted application protects that hostname.
 3. Cloudflare Access Managed OAuth is enabled for MCP clients.
-4. The origin service listens on a private interface such as `127.0.0.1`.
-5. The origin validates `Cf-Access-Jwt-Assertion` with `CF_ACCESS_TEAM_DOMAIN`
+4. Managed OAuth has Dynamic Client Registration enabled and a grant session
+   duration long enough for agent use. For Claude, allow
+   `https://claude.ai/api/mcp/auth_callback` and
+   `https://claude.com/api/mcp/auth_callback`.
+5. The origin service listens on a private interface such as `127.0.0.1`.
+6. The origin validates `Cf-Access-Jwt-Assertion` with `CF_ACCESS_TEAM_DOMAIN`
    and `CF_ACCESS_AUD`.
 
 ## Vault Sync

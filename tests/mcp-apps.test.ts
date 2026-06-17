@@ -13,6 +13,7 @@ import { createApp } from "../src/http.js";
 let tempDir: string;
 let server: Server;
 let baseUrl: string;
+let mcpSessionId: string | undefined;
 
 beforeEach(async () => {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "obsidian-mcp-apps-test-"));
@@ -39,6 +40,7 @@ beforeEach(async () => {
     throw new Error("Expected TCP server address");
   }
   baseUrl = `http://127.0.0.1:${address.port}`;
+  mcpSessionId = undefined;
 });
 
 afterEach(async () => {
@@ -52,8 +54,9 @@ afterEach(async () => {
 
 describe("MCP Apps integration", () => {
   it("advertises MCP Apps support in the initialize result", async () => {
-    const { body } = await initializeMcp();
+    const { body, sessionId } = await initializeMcp();
 
+    expect(sessionId).toEqual(expect.any(String));
     expect(
       body.result.capabilities.extensions["io.modelcontextprotocol/ui"].mimeTypes
     ).toContain("text/html;profile=mcp-app");
@@ -136,13 +139,12 @@ describe("MCP Apps integration", () => {
     expect(result.result.content[0].text).toContain("Projects/Cloudflare.md");
   });
 
-  it("ignores stale MCP session IDs in stateless mode", async () => {
+  it("keeps a stateless fallback for clients that do not send session IDs", async () => {
     const toolsResponse = await fetch(`${baseUrl}/mcp`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-        "mcp-session-id": "stale-session"
+        accept: "application/json, text/event-stream"
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -156,6 +158,26 @@ describe("MCP Apps integration", () => {
     const tools = await parseMcpResponse(toolsResponse);
     expect(tools.result.tools.some((tool: { name: string }) => tool.name === "search_notes")).toBe(true);
 
+    const response = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream"
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "search_notes", arguments: { query: "OAuth" } }
+      })
+    });
+
+    expect(response.status).toBe(200);
+    const result = await parseMcpResponse(response);
+    expect(result.result.content[0].text).toContain("Projects/Cloudflare.md");
+  });
+
+  it("falls back gracefully when clients send stale MCP session IDs", async () => {
     const response = await fetch(`${baseUrl}/mcp`, {
       method: "POST",
       headers: {
@@ -294,7 +316,8 @@ async function closeServer(target: Server) {
 }
 
 async function initialize() {
-  await initializeMcp();
+  const { sessionId } = await initializeMcp();
+  mcpSessionId = sessionId;
 }
 
 async function initializeMcp() {
@@ -324,10 +347,10 @@ async function initializeMcp() {
 
   expect(response.status).toBe(200);
   const sessionId = response.headers.get("mcp-session-id");
-  expect(sessionId).toBeNull();
+  expect(sessionId).toEqual(expect.any(String));
   const body = await parseMcpResponse(response);
 
-  return { body };
+  return { body, sessionId: sessionId! };
 }
 
 async function callMcp(method: string, params: unknown) {
@@ -335,7 +358,8 @@ async function callMcp(method: string, params: unknown) {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      accept: "application/json, text/event-stream"
+      accept: "application/json, text/event-stream",
+      ...(mcpSessionId ? { "mcp-session-id": mcpSessionId } : {})
     },
     body: JSON.stringify({
       jsonrpc: "2.0",
